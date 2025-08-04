@@ -1,0 +1,201 @@
+%%Initialize
+clear; clc; close all;
+addpath(append(matlabdrive,"\High Frequency Finance and Algorithmic Trading\"));
+addpath(append(matlabdrive,"\Code Toolbox\"));
+format short
+
+%%Data formatting
+data = readtable("EURUSD-minute.csv");
+data.Return = log(data.Close)-log(lagmatrix(data.Close,1));
+
+data.clock = datetime(append(data.Date,' ',data.Time),"Format","uuuu.MM.dd HH:mm");
+data.Time = datetime(data.Time,"Format","HH:mm");
+data.Date = datetime(data.Date,"Format","uuuu.MM.dd");
+
+%graph = data.Time ~= datetime("00:00","Format","HH:mm")
+
+data = sortrows(data,"clock");
+
+%%Descriptive Statistics
+fprintf('<strong>Descriptive Statistics</strong>\n');
+fprintf('n: %i\n',length(data.Return));
+fprintf('Minimum (in percent): %.4f\n',min(data.Return)*100);
+fprintf('25th percentile (in percent): %.4f\n',prctile(data.Return,25)*100)
+fprintf('Median (in percent): %.4f\n',prctile(data.Return,50)*100)
+fprintf('Mean (in percent): %.4f\n',mean(data.Return,"all","omitmissing")*100)
+fprintf('75th percentil (in percent): %.4f\n',prctile(data.Return,75)*100)
+fprintf('Maximum (in percent): %.4f\n',max(data.Return)*100);
+fprintf('\n')
+fprintf('Standard Deviation (in percent): %.4f\n',std(data.Return(2:end))*100);
+fprintf('-------------------------------------------------------------------------------------------------\n');
+
+figure();
+plot(data.clock,data.Return);
+xlabel('Time');
+ylabel('Return');
+grid on;
+
+%%Distributions
+fprintf('<strong>Distribution</strong>\n');
+fprintf('Kurtosis: %.4f\n',kurtosis(data.Return));
+JB = struct();
+[JB.h,JB.p,JB.stat,JB.cv] = jbtest(data.Return);
+if JB.h == 1
+    fprintf('<strong>Jarque-Bera Test Results</strong>\nHypothesis result: %d\nP-Value: %.4f \nTest-Statistic: %.4f\nCritical value: %.4f\nRejecting normality of the distribution\n',JB.h,JB.p,JB.stat,JB.cv);
+elseif JB.h == 0
+    fprintf('<strong>Jarque-Bera Test Results</strong>\nHypothesis result: %d\nP-Value: %.4f \nTest-Statistic: %.4f\nCritical value: %.4f\nCannot reject normality of the distribution\n',JB.h,JB.p,JB.stat,JB.cv);
+else
+    fprintf('Error\n')
+end
+figure();
+histogram(data.Return,50);
+
+figure();
+qqplot(data.Return); % Generates a Q-Q plot of 'data' against the normal distribution
+title('Q-Q Plot of Financial Returns vs. Normal Distribution');
+xlabel('Theoretical Quantiles (Normal Distribution)');
+ylabel('Empirical Quantiles (Returns)');
+grid on;
+fprintf('-------------------------------------------------------------------------------------------------\n');
+
+%%Volatility Clustering
+fprintf('<strong>GARCH Model</strong>\n');
+[mdl,P,Q,val] = AICBICfinderGARCH(data.Return(2:end,:),3,3,'bic');
+Model_type = garch(P,Q); %Please fill in arima(p,d,q), garch(p,q)
+[EstMdl,EstParamCov,logL,Output] = estimate(Model_type,data.Return);
+
+win = 20; %window size
+start_i = win+1;
+vola = nan(length(data.Return),1);
+for i = start_i:length(data.Return)
+    vola(i) = std(data.Return(i-win:i));
+end
+
+figure();
+plot(data.clock,vola);
+
+fprintf('-------------------------------------------------------------------------------------------------\n');
+
+%%Autocorrelation and Partial-Autocorrelation
+figure();
+subplot(2,1,1);
+autocorr(data.Return);
+subplot(2,1,2);
+parcorr(data.Return);
+
+fprintf('<strong>ARMA Model</strong>\n');
+[mdl,P,Q,val] = AICBICfinder(data.Return(2:end,:),3,3,'bic');
+Model_type = arima(P,0,Q); %Please fill in arima(p,d,q), garch(p,q)
+[EstMdl,EstParamCov,logL,Output] = estimate(Model_type,data.Return);
+fprintf('-------------------------------------------------------------------------------------------------\n');
+
+%%Memory
+[H] = hurstExponentRS(data.Return(2:end));
+
+fprintf('<strong>Hurst Exponent Test</strong>\n');
+fprintf('Estimated Hurst Exponent: %.4f \n',H);
+fprintf('-------------------------------------------------------------------------------------------------\n');
+
+%%Test for Unit Root
+IC = 3; %Choose information criteria --> standard 3(mod BIC).
+maxlag = 5; % When empty: maxlag = floor(12 * (length(y) / 100)^(0.25)), can be adjusted
+mflag = 0;
+[adf_stat, lagselected] = ADF_IC(data.Return(2:end,:),IC,maxlag,mflag);
+fprintf('<strong>ADF IC Test Results</strong> \nMax tested lag: %d \nSelected mflag: %d \nADF statistic: %.4f \nselected lag: %d \n',maxlag,mflag,adf_stat,lagselected);
+
+%%Function Hurst Exponents Test
+function H = hurstExponentRS(data)
+% HURSTEXPONENTRS Estimates the Hurst Exponent using Rescaled Range (R/S) analysis.
+%   H = hurstExponentRS(data) estimates the Hurst Exponent for the given time series 'data'.
+%   'data' should be a numeric array (vector).
+
+if ~isvector(data) || ~isnumeric(data)
+    error('Input data must be a numeric vector.');
+end
+
+n = length(data);
+if n < 100 % R/S analysis requires sufficient data
+    warning('Data length is short for reliable R/S analysis. Consider more data.');
+end
+
+% Ensure data is a row vector for easier slicing
+if iscolumn(data)
+    data = data';
+end
+
+max_k = floor(n / 2); % Max block size to use for calculation
+
+log_RS_values = [];
+log_k_values = [];
+
+% Iterate through various block sizes (k)
+for k = 10:max_k % Start from a reasonable block size
+    num_blocks = floor(n / k);
+    
+    if num_blocks < 2
+        continue; % Need at least two blocks to compute RS
+    end
+    
+    RS_sum = 0;
+    
+    for i = 1:num_blocks
+        start_idx = (i-1)*k + 1;
+        end_idx = i*k;
+        
+        block = data(start_idx:end_idx);
+        
+        % 1. Calculate the mean of the block
+        mean_block = mean(block);
+        
+        % 2. Create the cumulative deviation series
+        Y = cumsum(block - mean_block);
+        
+        % 3. Calculate the range (R)
+        R = max(Y) - min(Y);
+        
+        % 4. Calculate the standard deviation (S)
+        S = std(block);
+        
+        % Avoid division by zero if std is zero (e.g., all values are same)
+        if S == 0
+            RS_sum = RS_sum + 0; % Or handle as NaN, depending on desired behavior
+        else
+            RS_sum = RS_sum + (R / S);
+        end
+    end
+    
+    % Average RS over all blocks of size k
+    avg_RS = RS_sum / num_blocks;
+    
+    if avg_RS > 0 % Ensure no log of zero/negative
+        log_RS_values = [log_RS_values; log(avg_RS)]; %#ok<AGROW>
+        log_k_values = [log_k_values; log(k)]; %#ok<AGROW>
+    end
+end
+
+% Fit a line to log(R/S) vs log(k) to find the slope (Hurst Exponent)
+if length(log_k_values) < 2
+    H = NaN; % Not enough data points to fit a line
+    warning('Not enough valid R/S pairs to estimate Hurst Exponent.');
+    return;
+end
+
+% Use polyfit to find the slope
+coefficients = polyfit(log_k_values, log_RS_values, 1);
+H = coefficients(1); % The first coefficient is the slope
+
+% Optional: Plot the log-log plot for visualization
+figure;
+plot(log_k_values, log_RS_values, 'o', 'MarkerFaceColor', 'b');
+hold on;
+plot(log_k_values, polyval(coefficients, log_k_values), 'r-');
+title('R/S Analysis Log-Log Plot');
+xlabel('log(k) (Block Size)');
+ylabel('log(R/S)');
+legend('Data Points', ['Fitted Line (Slope = ', num2str(H, '%.4f'), ')']);
+grid on;
+
+end
+
+
+
